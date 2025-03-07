@@ -6,7 +6,8 @@ const commandLineArgs = require('command-line-args');
 const optionDefinitions = [
     { name: 'uri', alias: 'u', type: String, defaultValue: 'http://localhost:9200/' }, // Opensearch URI
     { name: 'index', alias: 'i', type: String },
-    { name: 'target', alias: 't', type: String }
+    { name: 'target', alias: 't', type: String },
+    { name: 'keep', alias: 'k', type: Number, defaultValue: 1 } // How many unaliased versions of index to keep
 ];
 const args = commandLineArgs(optionDefinitions);
 if(!args.index || !args.target) {
@@ -19,45 +20,58 @@ const elasticNode = args.uri;
 let client = getClient(elasticNode);
 
 getAliases(client, args)
-.then( (result) => {
+.then( (result) => { // REMOVE OLD ALIAS
     if(result.statusCode == 200) {
         if(result.body.length == 0) { // There is no alias to remove.
             return { statusCode: 200 }
         }
-        // If it exists, delete the old alias...
         let current = result.body[0];
         return removeOldAlias(client, current);
     }
-    else {
-        console.error('GET ERROR: Exit with status code ',result.statusCode);
-        process.exit(result.statusCode);
-    }
+    else outputError(result.statusCode);
 } )
-.then( (status) => {
-    if(status.statusCode == 200) {
-        // Put the new alias...
+.then( (result) => { // PUT NEW ALIAS
+    if(result.statusCode == 200) {
         let next = {
             index: args.target,
             alias: args.index
         }
         return putNewAlias(client, next);
     }
-    else {
-        console.error('POST ERROR: Exit with status: ',status);
-        process.exit(status.statusCode);
-    }
+    else outputError(result.statusCode);
 } )
-.then( (status) => {
-    if(status.statusCode == 200) {
-        console.log('SUCCESS!');
-        process.exit(0);
+.then( (result) => { // GET OLD INDICES
+    if(result.statusCode == 200) {
+        return getIndices(client, args);
     }
-    else {
-        console.error('POST ERROR: Exit with status code ',status.statusCode);
-        process.exit(status.statusCode);
+    else outputError(result.statusCode);
+} )
+.then( (result) => { // REMOVE OLD INDICES
+    if(result.statusCode == 200) {
+        if(result.body.length <= args.keep) { // No need to delete any indexes
+            return { statusCode: 200 }
+        }
+        else {
+            return removeOldIndices(client, args, result.body);
+        }
     }
+    else outputError(result.statusCode);
+} )
+.then ( (result) => {
+    console.log(result);
+    process.exit(0);
 } )
 .catch( (err) => console.log( JSON.stringify(err, null, 4) ) );
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+
+function outputError(code) {
+    console.error('GET ERROR: Exit with status code ',code);
+    process.exit(code);
+}
 
 async function getAliases(client, args) {
     let aliases = await client.cat.aliases({
@@ -66,6 +80,15 @@ async function getAliases(client, args) {
     });
 
     return aliases;
+}
+
+async function getIndices(client, args) {
+    let indices = await client.cat.indices({
+        index: args.index + '*',
+        format: 'json'
+    });
+
+    return indices;
 }
 
 async function removeOldAlias(client, old) {
@@ -81,6 +104,29 @@ async function putNewAlias(client, next) {
         index: next.index,
         name: next.alias
     });
+    return result;
+}
+
+async function removeOldIndices(client, args, list) {
+    let names = [];
+
+    // Extract index names into list, except the index we just aliased
+    for(let i=0; i<list.length; i++) {
+        let index = list[i];
+        if(index.index != args.target) names.push(index.index);
+    }
+    names.sort(); // Sort alphabetically, which means by date
+
+    for(let j=0; j<names.length - args.keep; j++) {
+        await removeIndex(client, names[j]);
+    }
+    return 'SUCCESS';
+}
+
+async function removeIndex(client, index) {
+    let result = await client.indices.delete({
+        index: index
+    })
     return result;
 }
 
