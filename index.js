@@ -5,6 +5,7 @@ const commandLineArgs = require('command-line-args');
 
 const optionDefinitions = [
     { name: 'uri', alias: 'u', type: String, defaultValue: 'http://localhost:9200/' }, // Opensearch URI
+    { name: 'operation', alias: 'o', type: String, defaultValue: 'alias' },
     { name: 'index', alias: 'i', type: String },
     { name: 'target', alias: 't', type: String },
     { name: 'keep', alias: 'k', type: Number, defaultValue: 1 } // How many unaliased versions of index to keep
@@ -19,49 +20,68 @@ if(!args.index || !args.target) {
 const elasticNode = args.uri;
 let client = getClient(elasticNode);
 
-getAliases(client, args)
-.then( (result) => { // REMOVE OLD ALIAS
-    if(result.statusCode == 200) {
-        if(result.body.length == 0) { // There is no alias to remove.
-            return { statusCode: 200 }
+switch(args.operation) {
+    case 'reindex':
+        executeReindexTools(client, args);
+        break;
+    case 'alias':
+    default:
+        executeAliasTools(client, args);
+}
+
+function executeReindexTools(client, args) {
+    reindexData(client, args)
+    .then( (result) => {
+        console.log(JSON.stringify(result, null, 4));
+    } )
+}
+
+function executeAliasTools(client, args) {
+    getAliases(client, args)
+    .then( (result) => { // REMOVE OLD ALIAS
+        if(result.statusCode == 200) {
+            if(result.body.length == 0) { // There is no alias to remove.
+                return { statusCode: 200 }
+            }
+            let current = result.body[0];
+            return removeOldAlias(client, current);
         }
-        let current = result.body[0];
-        return removeOldAlias(client, current);
-    }
-    else outputError(result.statusCode);
-} )
-.then( (result) => { // PUT NEW ALIAS
-    if(result.statusCode == 200) {
-        let next = {
-            index: args.target,
-            alias: args.index
+        else outputError(result.statusCode);
+    } )
+    .then( (result) => { // PUT NEW ALIAS
+        if(result.statusCode == 200) {
+            let next = {
+                index: args.target,
+                alias: args.index
+            }
+            return putNewAlias(client, next);
         }
-        return putNewAlias(client, next);
-    }
-    else outputError(result.statusCode);
-} )
-.then( (result) => { // GET OLD INDICES
-    if(result.statusCode == 200) {
-        return getIndices(client, args);
-    }
-    else outputError(result.statusCode);
-} )
-.then( (result) => { // REMOVE OLD INDICES
-    if(result.statusCode == 200) {
-        if(result.body.length <= args.keep) { // No need to delete any indexes
-            return { statusCode: 200 }
+        else outputError(result.statusCode);
+    } )
+    .then( (result) => { // GET OLD INDICES
+        if(result.statusCode == 200) {
+            return getIndices(client, args);
         }
-        else {
-            return removeOldIndices(client, args, result.body);
+        else outputError(result.statusCode);
+    } )
+    .then( (result) => { // REMOVE OLD INDICES
+        if(result.statusCode == 200) {
+            if(result.body.length <= args.keep) { // No need to delete any indexes
+                return { statusCode: 200 }
+            }
+            else {
+                return removeOldIndices(client, args, result.body);
+            }
         }
-    }
-    else outputError(result.statusCode);
-} )
-.then ( (result) => {
-    console.log(result);
-    process.exit(0);
-} )
-.catch( (err) => console.log( JSON.stringify(err, null, 4) ) );
+        else outputError(result.statusCode);
+    } )
+    .then ( (result) => {
+        console.log(result);
+        process.exit(0);
+    } )
+    .catch( (err) => console.log( JSON.stringify(err, null, 4) ) );
+
+}
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -71,6 +91,22 @@ getAliases(client, args)
 function outputError(code) {
     console.error('GET ERROR: Exit with status code ',code);
     process.exit(code);
+}
+
+async function reindexData(client, args) {
+    const response = await client.reindex({
+        body: {
+            source: {
+                index: args.index,
+            },
+            dest: {
+                index: args.target,
+            },
+        },
+        wait_for_completion: false
+    });
+
+    return response;
 }
 
 async function getAliases(client, args) {
